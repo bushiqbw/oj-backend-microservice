@@ -1,4 +1,4 @@
-package com.qbw.ojbackendjudgeservice.rabbitmq;
+package com.qbw.ojbackendjudgeservice.rabbitmqOld;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;

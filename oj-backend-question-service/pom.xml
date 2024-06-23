@@ -38,6 +38,11 @@
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>3.13.6</version>
+        </dependency>
+        <dependency>
             <groupId>com.qbw</groupId>
             <artifactId>oj-backend-common</artifactId>
             <version>0.0.1-SNAPSHOT</version>

@@ -1,5 +1,8 @@
 package com.qbw.ojbackendquestionservice.controller;
 
+import cn.hutool.core.lang.TypeReference;
+import cn.hutool.core.util.RandomUtil;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
@@ -8,6 +11,7 @@ import com.qbw.ojbackendcommon.common.BaseResponse;
 import com.qbw.ojbackendcommon.common.DeleteRequest;
 import com.qbw.ojbackendcommon.common.ErrorCode;
 import com.qbw.ojbackendcommon.common.ResultUtils;
+import com.qbw.ojbackendcommon.constant.RedisKeyConstant;
 import com.qbw.ojbackendcommon.constant.UserConstant;
 import com.qbw.ojbackendcommon.exception.BusinessException;
 import com.qbw.ojbackendcommon.exception.ThrowUtils;
@@ -19,16 +23,23 @@ import com.qbw.ojbackendmodel.model.entity.QuestionSubmit;
 import com.qbw.ojbackendmodel.model.entity.User;
 import com.qbw.ojbackendmodel.model.vo.QuestionSubmitVO;
 import com.qbw.ojbackendmodel.model.vo.QuestionVO;
+import com.qbw.ojbackendquestionservice.config.RedisLimiterManager;
 import com.qbw.ojbackendquestionservice.service.QuestionService;
 import com.qbw.ojbackendquestionservice.service.QuestionSubmitService;
 import com.qbw.ojbackendserviceclient.service.UserFeignClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import static com.qbw.ojbackendcommon.constant.RedisConstant.*;
+import static com.qbw.ojbackendcommon.constant.RedisKeyConstant.CACHE_QUESTION_KEY;
+import static com.qbw.ojbackendcommon.constant.RedisKeyConstant.QUESTION_D0_SUBMIT;
 
 /**
  * 题目接口
@@ -52,6 +63,11 @@ public class QuestionController {
 
     private final static Gson GSON = new Gson();
 
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
     // region 增删改查
 
     /**
@@ -88,6 +104,8 @@ public class QuestionController {
         boolean result = questionService.save(question);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
         long newQuestionId = question.getId();
+        //如果添加了新的问题，就重新刷新缓存
+        stringRedisTemplate.delete(CACHE_QUESTION_KEY);
         return ResultUtils.success(newQuestionId);
     }
 
@@ -186,9 +204,23 @@ public class QuestionController {
         if (id <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
+        String key = CACHE_QUESTION_KEY + QUESTION_D0_SUBMIT +id;
+        String questionJson = stringRedisTemplate.opsForValue().get(key);
+        if (StrUtil.isNotBlank(questionJson)) {
+            //命中直接返回
+            Question question = JSONUtil.toBean(questionJson, Question.class);
+            log.info("加载该题目缓存");
+            return ResultUtils.success(questionService.getQuestionVO(question, request));
+        }
+        log.info("加载该题目数据库");
         Question question = questionService.getById(id);
         if (question == null) {
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL + RandomUtil.randomLong(1, 10), TimeUnit.MINUTES);
+            //解决缓存穿透，如果不存在，返回一个空值，避免过多不存在请求到达数据库
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR);
+        } else {
+            //缓存到redis中，加入随机的缓存时间防止缓存穿透
+            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(question), CACHE_QUESTION_TTL + RandomUtil.randomLong(1, 3), TimeUnit.MINUTES);
         }
         return ResultUtils.success(questionService.getQuestionVO(question, request));
     }
@@ -207,9 +239,23 @@ public class QuestionController {
         long size = questionQueryRequest.getPageSize();
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
-        Page<Question> questionPage = questionService.page(new Page<>(current, size),
-                questionService.getQueryWrapper(questionQueryRequest));
-        return ResultUtils.success(questionService.getQuestionVOPage(questionPage, request));
+        String pageJson = stringRedisTemplate.opsForValue().get(CACHE_QUESTION_KEY + current);
+        Page<Question> questionPage = null;
+        Page<QuestionVO> questionVoPage = null;
+        //将分页查询到的数据缓存到redis
+        if (StrUtil.isBlank(pageJson)) {
+            //3.从数据库取出来之后
+            questionPage = questionService.page(new Page<>(current, size), questionService.getQueryWrapper(questionQueryRequest));
+            questionVoPage = questionService.getQuestionVOPage(questionPage,request);
+            log.info("从数据库中查询");
+            //4.再次缓存到redis,设置缓存的过期时间，30分钟，重新缓存查询一次
+            stringRedisTemplate.opsForValue().set(CACHE_QUESTION_KEY + current, JSONUtil.toJsonStr((questionVoPage)), CACHE_QUESTION_PAGE_TTL, TimeUnit.MINUTES);
+        } else {
+            log.info("加载缓存");
+            questionVoPage = JSONUtil.toBean(pageJson, new TypeReference<Page<QuestionVO>>() {
+            }, true);
+        }
+        return ResultUtils.success(questionVoPage);
     }
 
     /**
@@ -312,8 +358,15 @@ public class QuestionController {
         }
         // 登录才能点赞
         final User loginUser = userFeignClient.getLoginUser(request);
-        long questionSubmitId = questionSubmitService.doQuestionSubmit(questionSubmitAddRequest, loginUser);
-        return ResultUtils.success(questionSubmitId);
+        boolean rateLimit = redisLimiterManager.doRateLimit(RedisKeyConstant.LIMIT_KEY_PREFIX + loginUser.getId().toString());
+        if(!rateLimit){
+            throw new BusinessException(ErrorCode.TOO_MANY_REQUEST, "提交过于频繁,请稍后重试");
+        }else {
+            log.info("提交成功,题号：{},用户：{}", questionSubmitAddRequest.getQuestionId(), loginUser.getId());
+            Long result = questionSubmitService.doQuestionSubmit(questionSubmitAddRequest, loginUser);
+            stringRedisTemplate.delete(CACHE_QUESTION_KEY);
+            return ResultUtils.success(result);
+        }
     }
 
     /**

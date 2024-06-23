@@ -29,6 +29,13 @@ public interface UserConstant {
      * 被封号
      */
     String BAN_ROLE = "ban";
+    /**
+     * COS 访问地址：默认头像.jpg
+     * todo 需替换配置
+     */
+    String DEFAULT_AVATAR = "";
+
+    String DEFAULT_USERNAME = "做题家-"+String.valueOf(System.currentTimeMillis()).substring(0,5);
 
     // endregion
 }

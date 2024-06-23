@@ -17,6 +17,10 @@ spring:
           uri: lb://oj-backend-judge-service
           predicates:
             - Path=/api/judge/**
+        - id: oj-backend-question-comment
+          uri: lb://oj-backend-question-comment
+          predicates:
+            - Path=/api/question_comment/**
   application:
     name: oj-backend-gateway
   main:

@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.qbw.ojbackendcommon.common.ErrorCode;
 import com.qbw.ojbackendcommon.constant.CommonConstant;
+import com.qbw.ojbackendcommon.constant.MqConstant;
 import com.qbw.ojbackendcommon.exception.BusinessException;
 import com.qbw.ojbackendcommon.utils.SqlUtils;
 import com.qbw.ojbackendmodel.model.dto.questionsubmit.QuestionSubmitAddRequest;
@@ -91,7 +92,7 @@ public class QuestionSubmitServiceImpl extends ServiceImpl<QuestionSubmitMapper,
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,"数据插入失败！");
         }
         Long questionSubmitId = questionSubmit.getId();
-        myMessageProducer.sendMessage("code_exchange","my_routingKey",String.valueOf(questionSubmitId));
+        myMessageProducer.sendMessage(MqConstant.DIRECT_EXCHANGE, "oj", String.valueOf(questionSubmitId));
         // 执行判题服务
 //        CompletableFuture.runAsync(() -> {
 //            judgeFeignClient.doJudge(questionSubmitId);
